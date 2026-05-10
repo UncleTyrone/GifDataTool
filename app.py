@@ -8,8 +8,9 @@ Run: streamlit run app.py
 from __future__ import annotations
 
 import base64
-import hashlib
+import html
 import os
+import urllib.parse
 from pathlib import Path
 
 import streamlit as st
@@ -95,24 +96,6 @@ def _cached_front_sprite_gif_bytes(filename: str) -> bytes | None:
     return blob
 
 
-def _sprite_pick_checkbox_key(fn: str) -> str:
-    gen = st.session_state.get("gif_pick_generation", 0)
-    h = hashlib.sha256(fn.encode("utf-8")).hexdigest()[:22]
-    return f"gif_pick_cb_{gen}_{h}"
-
-
-def _sync_sprite_pick_checkbox(fn: str) -> None:
-    """Keep ``gif_sprite_picks`` in sync when a browse checkbox toggles."""
-    key = _sprite_pick_checkbox_key(fn)
-    want = bool(st.session_state[key])
-    lst = st.session_state.setdefault("gif_sprite_picks", [])
-    if want:
-        if fn not in lst:
-            lst.append(fn)
-    else:
-        st.session_state.gif_sprite_picks = [x for x in lst if x != fn]
-
-
 def _env(key: str, ui_val: str) -> str:
     v = (ui_val or "").strip() or os.environ.get(key, "")
     return v.strip()
@@ -135,21 +118,34 @@ def _preview_animated_gif(gif_bytes: bytes, width: int = 120) -> None:
     st.iframe(html, height=iframe_h, width="stretch")
 
 
-def _preview_animated_gif_square(gif_bytes: bytes, box: int = 64) -> None:
-    """Square tile preview for browse grid (pixel art centered, island-style frame)."""
+def _sprite_browse_clickable_tile(
+    gif_bytes: bytes, *, box: int, filename: str, picked: bool
+) -> None:
+    """Square GIF tile; entire tile is a link that toggles selection via ``?gif_toggle=``."""
     b64 = base64.standard_b64encode(gif_bytes).decode("ascii")
-    r = max(10, min(box // 5, 14))
-    html = (
+    r = max(10, min(box // 5, 16))
+    q = urllib.parse.quote(filename, safe="")
+    border = (
+        "2px solid rgba(59,130,246,0.95)"
+        if picked
+        else "1px solid rgba(80,90,110,0.22)"
+    )
+    bg = "rgba(59,130,246,0.18)" if picked else "rgba(120,130,150,0.12)"
+    inner = (
         f'<div style="width:{box}px;height:{box}px;margin:0 auto;box-sizing:border-box;'
         f'display:flex;align-items:center;justify-content:center;'
-        f'background:rgba(120,130,150,0.12);border-radius:{r}px;'
-        f'border:1px solid rgba(80,90,110,0.22);box-shadow:0 1px 2px rgba(0,0,0,0.06);">'
-        f'<img src="data:image/gif;base64,{b64}" '
-        'style="max-width:92%;max-height:92%;width:auto;height:auto;object-fit:contain;'
+        f'background:{bg};border-radius:{r}px;border:{border};overflow:hidden;cursor:pointer;">'
+        f'<img src="data:image/gif;base64,{b64}" alt="" draggable="false" '
+        'style="max-width:92%;max-height:92%;object-fit:contain;pointer-events:none;'
         'image-rendering:pixelated;image-rendering:-webkit-optimize-contrast;" />'
         "</div>"
     )
-    st.iframe(html, height=box + 6, width="stretch")
+    html = (
+        f'<a href="?gif_toggle={q}" '
+        'style="display:block;text-decoration:none;-webkit-tap-highlight-color:transparent;">'
+        f"{inner}</a>"
+    )
+    st.html(html, width="content")
 
 
 def _truncate_label(s: str, max_len: int = 20) -> str:
@@ -157,6 +153,31 @@ def _truncate_label(s: str, max_len: int = 20) -> str:
     if len(s) <= max_len:
         return s
     return s[: max_len - 1] + "…"
+
+
+def _consume_gif_toggle_query_param() -> None:
+    """Sprite tiles link to ``?gif_toggle=<filename>``; toggle pick and reopen the browser."""
+    qp = st.query_params
+    if "gif_toggle" not in qp:
+        return
+    raw = qp.get("gif_toggle")
+    if isinstance(raw, list):
+        raw = raw[0]
+    fn = urllib.parse.unquote(str(raw))
+    if not fn.lower().endswith(".gif"):
+        qp.pop("gif_toggle", None)
+        return
+    if fn not in set(list_front_gifs()):
+        qp.pop("gif_toggle", None)
+        return
+    lst = st.session_state.setdefault("gif_sprite_picks", [])
+    if fn in lst:
+        st.session_state.gif_sprite_picks = [x for x in lst if x != fn]
+    else:
+        lst.append(fn)
+    qp.pop("gif_toggle", None)
+    st.session_state["_open_sprite_browse_dialog"] = True
+    st.rerun()
 
 
 st.set_page_config(page_title="GifData Tool", layout="wide")
@@ -171,8 +192,9 @@ apply_saved_credentials_or_env(
 )
 
 st.session_state.setdefault("gif_sprite_picks", [])
-st.session_state.setdefault("gif_pick_generation", 0)
 st.session_state.setdefault("sprite_browse_page", 1)
+
+_consume_gif_toggle_query_param()
 
 
 @st.dialog("Browse Pokémon sprites", width="large")
@@ -182,8 +204,8 @@ def sprite_browse_dialog() -> None:
     with st.container(border=True):
         st.markdown("##### Sprite library")
         st.caption(
-            "Search by filename, slug, or display name. Toggle **Pick** to select — "
-            "choices stay saved when you close this window."
+            "Search by filename, slug, or display name. **Click a sprite** to add or remove "
+            "it from your selection — choices stay saved when you close this window."
         )
         filter_raw = st.text_input(
             "Search",
@@ -209,9 +231,9 @@ def sprite_browse_dialog() -> None:
         if filter_q and not filtered:
             st.warning("No matches — try a shorter search.")
 
-        PAGE_SIZE = 36
-        COLS = 6
-        TILE = 56
+        PAGE_SIZE = 30
+        COLS = 5
+        TILE = 96
         n_items = len(filtered)
         total_pages = max(1, (n_items + PAGE_SIZE - 1) // PAGE_SIZE) if n_items else 1
 
@@ -248,19 +270,22 @@ def sprite_browse_dialog() -> None:
                         slug = fn.replace(".gif", "")
                         display = slug_to_default_name(slug)
                         blob = _cached_front_sprite_gif_bytes(fn)
+                        picked = fn in st.session_state.gif_sprite_picks
                         if blob:
-                            _preview_animated_gif_square(blob, box=TILE)
+                            _sprite_browse_clickable_tile(
+                                blob,
+                                box=TILE,
+                                filename=fn,
+                                picked=picked,
+                            )
                         else:
                             st.caption("—")
-                        st.markdown(f"**{_truncate_label(display)}**")
-                        st.caption(_truncate_label(slug, 14))
-                        picked = fn in st.session_state.gif_sprite_picks
-                        st.checkbox(
-                            "Pick",
-                            value=picked,
-                            key=_sprite_pick_checkbox_key(fn),
-                            on_change=_sync_sprite_pick_checkbox,
-                            args=(fn,),
+                        st.markdown(
+                            '<p style="margin:4px 0 -8px 0;line-height:1.12;text-align:center;">'
+                            f'<strong style="font-size:0.92rem;">{html.escape(_truncate_label(display, 22))}</strong><br/>'
+                            f'<span style="font-size:0.74rem;color:#64748b;">'
+                            f"{html.escape(_truncate_label(slug, 18))}</span></p>",
+                            unsafe_allow_html=True,
                         )
 
         b1, b2, b3 = st.columns([1, 1, 1])
@@ -269,9 +294,6 @@ def sprite_browse_dialog() -> None:
         with b2:
             if st.button("Clear all picks", key="dlg_sprite_clear_all"):
                 st.session_state.gif_sprite_picks = []
-                st.session_state.gif_pick_generation = (
-                    st.session_state.get("gif_pick_generation", 0) + 1
-                )
                 st.rerun()
         with b3:
             if st.button(
@@ -410,6 +432,8 @@ if not _has_upload and not _has_disk:
 
 col_a, col_b = st.columns([1, 2])
 
+_open_sprite_browse = st.session_state.pop("_open_sprite_browse_dialog", False)
+
 with col_a:
     if st.button("Refresh sprite list (front /ani/)"):
         list_front_gifs.clear()
@@ -424,6 +448,9 @@ with col_a:
         use_container_width=True,
         help="Opens a modal with square thumbnails, names, and search.",
     ):
+        _open_sprite_browse = True
+
+    if _open_sprite_browse:
         sprite_browse_dialog()
 
     n_sel = len(st.session_state.gif_sprite_picks)
@@ -433,9 +460,6 @@ with col_a:
     if n_sel:
         if st.button("Clear selection"):
             st.session_state.gif_sprite_picks = []
-            st.session_state.gif_pick_generation = (
-                st.session_state.get("gif_pick_generation", 0) + 1
-            )
             st.rerun()
         with st.expander("Selected list", expanded=False):
             for fn in sorted(st.session_state.gif_sprite_picks, key=str.lower):
