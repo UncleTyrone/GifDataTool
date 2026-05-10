@@ -13,7 +13,6 @@ import os
 from pathlib import Path
 
 import streamlit as st
-import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
 from credentials_browser import (
@@ -133,7 +132,31 @@ def _preview_animated_gif(gif_bytes: bytes, width: int = 120) -> None:
     )
     # Sprites vary in height; leave room for tall backs / megas.
     iframe_h = min(max(int(width * 2.4), width + 40), 420)
-    components.html(html, height=iframe_h)
+    st.iframe(html, height=iframe_h, width="stretch")
+
+
+def _preview_animated_gif_square(gif_bytes: bytes, box: int = 64) -> None:
+    """Square tile preview for browse grid (pixel art centered, island-style frame)."""
+    b64 = base64.standard_b64encode(gif_bytes).decode("ascii")
+    r = max(10, min(box // 5, 14))
+    html = (
+        f'<div style="width:{box}px;height:{box}px;margin:0 auto;box-sizing:border-box;'
+        f'display:flex;align-items:center;justify-content:center;'
+        f'background:rgba(120,130,150,0.12);border-radius:{r}px;'
+        f'border:1px solid rgba(80,90,110,0.22);box-shadow:0 1px 2px rgba(0,0,0,0.06);">'
+        f'<img src="data:image/gif;base64,{b64}" '
+        'style="max-width:92%;max-height:92%;width:auto;height:auto;object-fit:contain;'
+        'image-rendering:pixelated;image-rendering:-webkit-optimize-contrast;" />'
+        "</div>"
+    )
+    st.iframe(html, height=box + 6, width="stretch")
+
+
+def _truncate_label(s: str, max_len: int = 20) -> str:
+    s = s.strip()
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 1] + "…"
 
 
 st.set_page_config(page_title="GifData Tool", layout="wide")
@@ -146,6 +169,119 @@ apply_saved_credentials_or_env(
     _ls_mgr,
     initial_disk_path=_initial_lua_path_str(),
 )
+
+st.session_state.setdefault("gif_sprite_picks", [])
+st.session_state.setdefault("gif_pick_generation", 0)
+st.session_state.setdefault("sprite_browse_page", 1)
+
+
+@st.dialog("Browse Pokémon sprites", width="large")
+def sprite_browse_dialog() -> None:
+    names = list_front_gifs()
+
+    with st.container(border=True):
+        st.markdown("##### Sprite library")
+        st.caption(
+            "Search by filename, slug, or display name. Toggle **Pick** to select — "
+            "choices stay saved when you close this window."
+        )
+        filter_raw = st.text_input(
+            "Search",
+            key="sprite_browse_filter_input",
+            placeholder="Filename, slug, or display name…",
+        )
+        filter_q = (filter_raw or "").strip().lower()
+
+        if st.session_state.get("_sprite_browse_filter_prev") != filter_q:
+            st.session_state["_sprite_browse_filter_prev"] = filter_q
+            st.session_state.sprite_browse_page = 1
+
+        def _row_matches(fn: str) -> bool:
+            if not filter_q:
+                return True
+            slug = fn.replace(".gif", "").lower()
+            if filter_q in slug or filter_q in fn.lower():
+                return True
+            label = slug_to_default_name(slug).lower()
+            return filter_q in label
+
+        filtered = [n for n in names if _row_matches(n)]
+        if filter_q and not filtered:
+            st.warning("No matches — try a shorter search.")
+
+        PAGE_SIZE = 36
+        COLS = 6
+        TILE = 56
+        n_items = len(filtered)
+        total_pages = max(1, (n_items + PAGE_SIZE - 1) // PAGE_SIZE) if n_items else 1
+
+        page = int(st.session_state.sprite_browse_page)
+        page = max(1, min(page, total_pages))
+        st.session_state.sprite_browse_page = page
+
+        nav_a, nav_b, nav_c = st.columns([1, 2, 1])
+        with nav_a:
+            if st.button("◀", disabled=page <= 1, key="dlg_sprite_prev"):
+                st.session_state.sprite_browse_page = page - 1
+                st.rerun()
+        with nav_b:
+            st.caption(
+                f"Page **{page}** / **{total_pages}** · "
+                f"**{n_items}** match(es)"
+                if filter_q
+                else f"Page **{page}** / **{total_pages}** · **{len(names)}** sprites"
+            )
+        with nav_c:
+            if st.button("▶", disabled=page >= total_pages, key="dlg_sprite_next"):
+                st.session_state.sprite_browse_page = page + 1
+                st.rerun()
+
+        start = (page - 1) * PAGE_SIZE
+        page_items = filtered[start : start + PAGE_SIZE] if n_items else []
+
+        if page_items:
+            for row_i in range(0, len(page_items), COLS):
+                row_fns = page_items[row_i : row_i + COLS]
+                cols = st.columns(COLS)
+                for ci, fn in enumerate(row_fns):
+                    with cols[ci]:
+                        slug = fn.replace(".gif", "")
+                        display = slug_to_default_name(slug)
+                        blob = _cached_front_sprite_gif_bytes(fn)
+                        if blob:
+                            _preview_animated_gif_square(blob, box=TILE)
+                        else:
+                            st.caption("—")
+                        st.markdown(f"**{_truncate_label(display)}**")
+                        st.caption(_truncate_label(slug, 14))
+                        picked = fn in st.session_state.gif_sprite_picks
+                        st.checkbox(
+                            "Pick",
+                            value=picked,
+                            key=_sprite_pick_checkbox_key(fn),
+                            on_change=_sync_sprite_pick_checkbox,
+                            args=(fn,),
+                        )
+
+        b1, b2, b3 = st.columns([1, 1, 1])
+        with b1:
+            st.caption(f"**{len(st.session_state.gif_sprite_picks)}** selected")
+        with b2:
+            if st.button("Clear all picks", key="dlg_sprite_clear_all"):
+                st.session_state.gif_sprite_picks = []
+                st.session_state.gif_pick_generation = (
+                    st.session_state.get("gif_pick_generation", 0) + 1
+                )
+                st.rerun()
+        with b3:
+            if st.button(
+                "Done",
+                type="primary",
+                use_container_width=True,
+                key="dlg_sprite_done",
+            ):
+                st.rerun()
+
 
 st.title("GifData sprite importer")
 st.caption(
@@ -282,104 +418,25 @@ with col_a:
     names = list_front_gifs()
     st.metric("Sprites in /ani/", len(names))
 
-    st.session_state.setdefault("gif_sprite_picks", [])
-    st.session_state.setdefault("gif_pick_generation", 0)
-    st.session_state.setdefault("sprite_browse_page", 1)
+    if st.button(
+        "Browse sprites…",
+        type="secondary",
+        use_container_width=True,
+        help="Opens a modal with square thumbnails, names, and search.",
+    ):
+        sprite_browse_dialog()
 
-    filter_q = st.text_input(
-        "Search (filename, slug, or display name)",
-        key="sprite_browse_filter_input",
-        help="Narrows the browse grid. Matches file stem (e.g. pikachu), slug pieces, or "
-        "capitalized label (e.g. mega, Meganium).",
-    ).strip().lower()
+    n_sel = len(st.session_state.gif_sprite_picks)
+    st.caption("Selection is stored in this session until you clear it.")
+    st.markdown(f"**{n_sel}** Pokémon selected")
 
-    if st.session_state.get("_sprite_browse_filter_prev") != filter_q:
-        st.session_state["_sprite_browse_filter_prev"] = filter_q
-        st.session_state.sprite_browse_page = 1
-
-    def _row_matches(fn: str) -> bool:
-        if not filter_q:
-            return True
-        slug = fn.replace(".gif", "").lower()
-        if filter_q in slug or filter_q in fn.lower():
-            return True
-        label = slug_to_default_name(slug).lower()
-        return filter_q in label
-
-    filtered = [n for n in names if _row_matches(n)]
-    if filter_q and not filtered:
-        st.warning("No Pokémon match that search — try a shorter or different term.")
-
-    PAGE_SIZE = 24
-    n_items = len(filtered)
-    total_pages = max(1, (n_items + PAGE_SIZE - 1) // PAGE_SIZE) if n_items else 1
-
-    page = int(st.session_state.sprite_browse_page)
-    page = max(1, min(page, total_pages))
-    st.session_state.sprite_browse_page = page
-
-    st.subheader("Browse sprites")
-    st.caption(
-        "Each tile shows the front animated sprite, the default **GifData** name, and the "
-        "Showdown filename stem. Check **Pick** to include that Pokémon."
-    )
-
-    nav_a, nav_b, nav_c = st.columns([1, 2, 1])
-    with nav_a:
-        if st.button("◀ Prev", disabled=page <= 1):
-            st.session_state.sprite_browse_page = page - 1
-            st.rerun()
-    with nav_b:
-        st.caption(
-            f"Page **{page}** / **{total_pages}** · **{n_items}** match(es)"
-            if filter_q
-            else f"Page **{page}** / **{total_pages}** · **{len(names)}** sprites"
-        )
-    with nav_c:
-        if st.button("Next ▶", disabled=page >= total_pages):
-            st.session_state.sprite_browse_page = page + 1
-            st.rerun()
-
-    start = (page - 1) * PAGE_SIZE
-    page_items = filtered[start : start + PAGE_SIZE] if n_items else []
-
-    COLS = 4
-    if page_items:
-        for row_i in range(0, len(page_items), COLS):
-            row_fns = page_items[row_i : row_i + COLS]
-            cols = st.columns(COLS)
-            for ci, fn in enumerate(row_fns):
-                with cols[ci]:
-                    slug = fn.replace(".gif", "")
-                    display = slug_to_default_name(slug)
-                    blob = _cached_front_sprite_gif_bytes(fn)
-                    if blob:
-                        _preview_animated_gif(blob, width=88)
-                    else:
-                        st.caption("No preview")
-                    st.markdown(f"**{display}**")
-                    st.caption(slug)
-                    picked = fn in st.session_state.gif_sprite_picks
-                    st.checkbox(
-                        "Pick",
-                        value=picked,
-                        key=_sprite_pick_checkbox_key(fn),
-                        on_change=_sync_sprite_pick_checkbox,
-                        args=(fn,),
-                    )
-
-    act_a, act_b = st.columns(2)
-    with act_a:
-        st.caption(f"**{len(st.session_state.gif_sprite_picks)}** Pokémon selected")
-    with act_b:
+    if n_sel:
         if st.button("Clear selection"):
             st.session_state.gif_sprite_picks = []
             st.session_state.gif_pick_generation = (
                 st.session_state.get("gif_pick_generation", 0) + 1
             )
             st.rerun()
-
-    if st.session_state.gif_sprite_picks:
         with st.expander("Selected list", expanded=False):
             for fn in sorted(st.session_state.gif_sprite_picks, key=str.lower):
                 s = fn.replace(".gif", "")
