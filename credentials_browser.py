@@ -5,6 +5,38 @@ from __future__ import annotations
 import os
 from typing import Any
 
+
+def likely_streamlit_cloud_or_hosted() -> bool:
+    """Best-effort detection of Streamlit Community Cloud / Snowflake-hosted runtimes."""
+    e = os.environ
+    if str(e.get("STREAMLIT_COMMUNITY_CLOUD", "")).lower() in ("1", "true", "yes"):
+        return True
+    if str(e.get("STREAMLIT_CLOUD_DEPLOYMENT", "")).lower() in ("1", "true", "yes"):
+        return True
+    for var in (
+        "STREAMLIT_SERVER_BASE_URL",
+        "STREAMLIT_BROWSER_SERVER_URL",
+        "STREAMLIT_SERVER_URL",
+    ):
+        url = (e.get(var) or "").lower()
+        if "streamlit.app" in url or "snowflakecomputing" in url:
+            return True
+    if e.get("SNOWFLAKE_ACCOUNT"):
+        return True
+    return False
+
+
+def should_show_server_dotenv_save_ui() -> bool:
+    """
+    Server-side `.env` writing only makes sense for local `streamlit run`.
+    Hide it on Streamlit Cloud unless explicitly forced (debug).
+    """
+    if os.environ.get("GIFDATA_SHOW_DOTENV_SAVE", "").lower() in ("1", "true", "yes"):
+        return True
+    if os.environ.get("GIFDATA_HIDE_DOTENV_SAVE", "").lower() in ("1", "true", "yes"):
+        return False
+    return not likely_streamlit_cloud_or_hosted()
+
 # Single JSON blob in localStorage (namespaced per Streamlit app URL path).
 CREDENTIALS_STORAGE_KEY = "gifdata_credentials_v1"
 

@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from credentials_browser import (
     apply_saved_credentials_or_env,
     save_credentials_to_browser,
+    should_show_server_dotenv_save_ui,
     try_local_storage_manager,
 )
 from gifdata_patch import format_entry_line, upsert_multi_section
@@ -162,30 +163,33 @@ with st.sidebar:
             "can be saved per browser."
         )
 
-    with st.expander("Advanced: write `.env` on the server (local dev)"):
-        st.caption(
-            "On Streamlit Cloud this file is **not** per-user and often **not writable**. "
-            "Prefer **Save credentials (this browser)** above."
-        )
-        if st.button("Save to `.env` file next to app"):
-            try:
-                merge_dotenv(
-                    ENV_FILE,
-                    {
-                        "ROBLOX_API_KEY": st.session_state.roblox_api_key,
-                        "ROBLOX_USER_ID": st.session_state.roblox_user_id,
-                        "ROBLOX_GROUP_ID": st.session_state.roblox_group_id,
-                        "GIFDATA_LUA_PATH": str(
-                            Path(st.session_state.gifdata_disk_path.strip()).expanduser()
-                        )
-                        if st.session_state.get("gifdata_disk_path", "").strip()
-                        else "",
-                    },
-                )
-                load_dotenv(ENV_FILE, override=True)
-                st.success(f"Wrote `{ENV_FILE.name}` on the server.")
-            except OSError as e:
-                st.error(f"Could not write `.env`: {e}")
+    if should_show_server_dotenv_save_ui():
+        with st.expander("Advanced: write `.env` on the server (local dev)"):
+            st.caption(
+                "Only for running this app on your own machine. "
+                "Not shown on Streamlit Community Cloud."
+            )
+            if st.button("Save to `.env` file next to app"):
+                try:
+                    merge_dotenv(
+                        ENV_FILE,
+                        {
+                            "ROBLOX_API_KEY": st.session_state.roblox_api_key,
+                            "ROBLOX_USER_ID": st.session_state.roblox_user_id,
+                            "ROBLOX_GROUP_ID": st.session_state.roblox_group_id,
+                            "GIFDATA_LUA_PATH": str(
+                                Path(
+                                    st.session_state.gifdata_disk_path.strip()
+                                ).expanduser()
+                            )
+                            if st.session_state.get("gifdata_disk_path", "").strip()
+                            else "",
+                        },
+                    )
+                    load_dotenv(ENV_FILE, override=True)
+                    st.success(f"Wrote `{ENV_FILE.name}` on the server.")
+                except OSError as e:
+                    st.error(f"Could not write `.env`: {e}")
 
 st.subheader("GifData.lua source")
 lua_upload = st.file_uploader(
