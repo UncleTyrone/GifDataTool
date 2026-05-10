@@ -105,6 +105,17 @@ def _toggle_sprite_pick(fn: str) -> None:
         st.session_state.gif_sprite_picks = [*cur, fn]
 
 
+def _sprite_browse_load_more(n_items: int) -> None:
+    """Extend how many sprites are rendered; ``n_items`` is len(filtered)."""
+    cur = int(st.session_state.sprite_browse_show_count)
+    remaining = max(0, n_items - cur)
+    step = min(_SPRITE_BROWSE_STEP, remaining)
+    if step <= 0:
+        return
+    st.session_state.sprite_browse_show_count = cur + step
+    st.session_state.sprite_browse_open = True
+
+
 def _sprite_pick_button_key(fn: str) -> str:
     # Full SHA256 — avoid any chance of key collisions from a truncated hash.
     h = hashlib.sha256(fn.encode("utf-8")).hexdigest()
@@ -145,23 +156,37 @@ def _sprite_browse_gif_only(
         else "1px solid rgba(80,90,110,0.22)"
     )
     bg = "rgba(59,130,246,0.18)" if picked else "rgba(120,130,150,0.12)"
+    # Stretch + flex-center matches the label; content-width shrink-wrap left-aligns the sprite.
     html_block = (
-        f'<div style="width:{box}px;height:{box}px;margin:0 auto;box-sizing:border-box;'
+        '<div style="width:100%;box-sizing:border-box;display:flex;justify-content:center;padding:0;">'
+        f'<div style="width:{box}px;height:{box}px;flex-shrink:0;box-sizing:border-box;'
         f'display:flex;align-items:center;justify-content:center;'
         f'background:{bg};border-radius:{r}px;border:{border};overflow:hidden;">'
         f'<img src="data:image/gif;base64,{b64}" alt="" draggable="false" '
         'style="max-width:92%;max-height:92%;object-fit:contain;'
         'image-rendering:pixelated;image-rendering:-webkit-optimize-contrast;" />'
-        "</div>"
+        "</div></div>"
     )
-    st.html(html_block, width="content")
+    st.html(html_block, width="stretch")
 
 
-def _truncate_label(s: str, max_len: int = 20) -> str:
-    s = s.strip()
-    if len(s) <= max_len:
-        return s
-    return s[: max_len - 1] + "…"
+def _sprite_browse_tile_label(
+    display: str,
+    *,
+    box: int,
+    margin_top_px: float = 0,
+) -> None:
+    """Name under the sprite; full display string (wraps inside a centered ``box``-wide column)."""
+    esc = html.escape(display.strip())
+    html_block = (
+        f'<div style="width:100%;box-sizing:border-box;display:flex;justify-content:center;'
+        f'margin:{margin_top_px}px 0 0;padding:0;direction:ltr;">'
+        f'<div style="width:{box}px;box-sizing:border-box;text-align:center;flex-shrink:0;">'
+        f'<span style="font-size:0.9rem;line-height:1.25;font-weight:600;'
+        'word-wrap:break-word;overflow-wrap:anywhere;">'
+        f"{esc}</span></div></div>"
+    )
+    st.html(html_block, width="stretch")
 
 
 st.set_page_config(page_title="GifData Tool", layout="wide")
@@ -176,10 +201,15 @@ apply_saved_credentials_or_env(
 )
 
 st.session_state.setdefault("gif_sprite_picks", [])
-st.session_state.setdefault("sprite_browse_page", 1)
+_SPRITE_BROWSE_INITIAL = 50
+_SPRITE_BROWSE_STEP = 50
+st.session_state.setdefault("sprite_browse_show_count", _SPRITE_BROWSE_INITIAL)
+st.session_state.setdefault("sprite_browse_open", False)
+
+_SPRITE_BROWSE_FILTER_SNAP = "_sprite_browse_filter_snap"
 
 
-@st.dialog("Browse Pokémon sprites", width="large")
+@st.dialog("Browse Pokémon sprites", width="large", dismissible=False)
 def sprite_browse_dialog() -> None:
     names = list_front_gifs()
 
@@ -190,28 +220,32 @@ def sprite_browse_dialog() -> None:
         _overlay_h = 108  # covers GIF + st.html wrapper slack so the hit target matches the sprite
         # Narrow hit targets to the sprite width (centered). Full-width invisible buttons +
         # negative margins were spilling into neighboring columns and toggling the wrong Pokémon.
+        # Pull the caption up under the art (tertiary + iframe wrappers leave a large gap otherwise).
+        _mb_pull = _overlay_h - _tile + 132
         st.markdown(
-            f"<style>"
-            f"[data-testid='stDialog'] button[kind='tertiary'],"
-            f"[role='dialog'] button[kind='tertiary'] {{"
+            "<style>"
+            "[data-testid='stDialog'] button[kind='tertiary'],"
+            "[role='dialog'] button[kind='tertiary']{"
             f"margin-top:-{_overlay_h}px!important;"
+            f"margin-bottom:-{_mb_pull}px!important;"
             f"min-height:{_overlay_h}px!important;"
             f"width:{_tile}px!important;"
             f"max-width:{_tile}px!important;"
             f"min-width:{_tile}px!important;"
-            f"margin-left:auto!important;"
-            f"margin-right:auto!important;"
-            f"display:block!important;"
-            f"opacity:0.06!important;"
-            f"position:relative!important;"
-            f"z-index:10!important;"
-            f"}}"
-            f"</style>",
+            "margin-left:auto!important;"
+            "margin-right:auto!important;"
+            "display:block!important;"
+            "opacity:0.06!important;"
+            "position:relative!important;"
+            "z-index:10!important;"
+            "}"
+            "</style>",
             unsafe_allow_html=True,
         )
         st.caption(
-            "Search by filename, slug, or display name. **Click the sprite** to toggle selection "
-            "(same row as its name). Updates stay in this session when you close the window."
+            "Search by filename, slug, or display name. **Click the sprite** to toggle selection. "
+            "Close with **Done** only — Esc/backdrop are disabled so actions like Load more / Clear all "
+            "stay inside this window."
         )
         filter_raw = st.text_input(
             "Search",
@@ -220,9 +254,13 @@ def sprite_browse_dialog() -> None:
         )
         filter_q = (filter_raw or "").strip().lower()
 
-        if st.session_state.get("_sprite_browse_filter_prev") != filter_q:
-            st.session_state["_sprite_browse_filter_prev"] = filter_q
-            st.session_state.sprite_browse_page = 1
+        # Reset pagination only when the search string actually changes — not on Load more /
+        # fragment reruns (``text_input`` ``on_change`` can fire spuriously inside ``@st.dialog``).
+        prev_snap = st.session_state.get(_SPRITE_BROWSE_FILTER_SNAP)
+        if prev_snap != filter_q:
+            st.session_state[_SPRITE_BROWSE_FILTER_SNAP] = filter_q
+            if prev_snap is not None:
+                st.session_state.sprite_browse_show_count = _SPRITE_BROWSE_INITIAL
 
         def _row_matches(fn: str) -> bool:
             if not filter_q:
@@ -237,76 +275,76 @@ def sprite_browse_dialog() -> None:
         if filter_q and not filtered:
             st.warning("No matches — try a shorter search.")
 
-        PAGE_SIZE = 30
         COLS = 5
         TILE = _tile
         n_items = len(filtered)
-        total_pages = max(1, (n_items + PAGE_SIZE - 1) // PAGE_SIZE) if n_items else 1
+        want = int(st.session_state.sprite_browse_show_count)
+        # Only clamp down when the filtered list shrank (e.g. new search); never overwrite with
+        # ``shown`` every run — that raced Load more and kept the count stuck at the first page.
+        if n_items and want > n_items:
+            st.session_state.sprite_browse_show_count = n_items
+            want = n_items
+        shown = min(want, n_items) if n_items else 0
+        slice_items = filtered[:shown] if n_items else []
 
-        page = int(st.session_state.sprite_browse_page)
-        page = max(1, min(page, total_pages))
-        st.session_state.sprite_browse_page = page
-
-        nav_a, nav_b, nav_c = st.columns([1, 2, 1])
-        with nav_a:
-            if st.button("◀", disabled=page <= 1, key="dlg_sprite_prev"):
-                st.session_state.sprite_browse_page = page - 1
-                st.rerun()
-        with nav_b:
+        if n_items:
             st.caption(
-                f"Page **{page}** / **{total_pages}** · "
-                f"**{n_items}** match(es)"
-                if filter_q
-                else f"Page **{page}** / **{total_pages}** · **{len(names)}** sprites"
+                f"**{shown}** of **{n_items}** "
+                f"({'matching search' if filter_q else 'sprites'}) — scroll inside the area below."
             )
-        with nav_c:
-            if st.button("▶", disabled=page >= total_pages, key="dlg_sprite_next"):
-                st.session_state.sprite_browse_page = page + 1
-                st.rerun()
 
-        start = (page - 1) * PAGE_SIZE
-        page_items = filtered[start : start + PAGE_SIZE] if n_items else []
+        if slice_items:
+            with st.container(height=520):
+                for row_i in range(0, len(slice_items), COLS):
+                    row_fns = slice_items[row_i : row_i + COLS]
+                    cols = st.columns(COLS)
+                    for ci, fn in enumerate(row_fns):
+                        with cols[ci]:
+                            # Side gutters center the 96px tile in the grid cell (fixes label skew).
+                            _gutter_l, tile_mid, _gutter_r = st.columns([3, 10, 3])
+                            with tile_mid:
+                                slug = fn.replace(".gif", "")
+                                display = slug_to_default_name(slug)
+                                blob = _cached_front_sprite_gif_bytes(fn)
+                                picked = fn in st.session_state.gif_sprite_picks
+                                if blob:
+                                    _sprite_browse_gif_only(blob, box=TILE, picked=picked)
+                                    st.button(
+                                        "\u200b",
+                                        key=_sprite_pick_button_key(fn),
+                                        type="tertiary",
+                                        width=TILE,
+                                        on_click=_toggle_sprite_pick,
+                                        args=(fn,),
+                                    )
+                                    _sprite_browse_tile_label(
+                                        display,
+                                        box=TILE,
+                                        margin_top_px=-18,
+                                    )
+                                else:
+                                    _sprite_browse_tile_label(display, box=TILE, margin_top_px=0)
+                                    st.caption("No preview")
+                                    st.button(
+                                        "Select" if not picked else "Deselect",
+                                        key=_sprite_pick_button_key(fn),
+                                        use_container_width=True,
+                                        on_click=_toggle_sprite_pick,
+                                        args=(fn,),
+                                    )
 
-        if page_items:
-            for row_i in range(0, len(page_items), COLS):
-                row_fns = page_items[row_i : row_i + COLS]
-                cols = st.columns(COLS)
-                for ci, fn in enumerate(row_fns):
-                    with cols[ci]:
-                        slug = fn.replace(".gif", "")
-                        display = slug_to_default_name(slug)
-                        blob = _cached_front_sprite_gif_bytes(fn)
-                        picked = fn in st.session_state.gif_sprite_picks
-                        if blob:
-                            _sprite_browse_gif_only(blob, box=TILE, picked=picked)
-                            st.button(
-                                "\u200b",
-                                key=_sprite_pick_button_key(fn),
-                                type="tertiary",
-                                width=TILE,
-                                on_click=_toggle_sprite_pick,
-                                args=(fn,),
-                            )
-                            st.markdown(
-                                '<p style="margin:6px 0 0 0;padding:0;text-align:center;'
-                                'font-size:0.9rem;line-height:1.15;">'
-                                f"<strong>{html.escape(_truncate_label(display, 26))}</strong></p>",
-                                unsafe_allow_html=True,
-                            )
-                        else:
-                            st.markdown(
-                                '<p style="margin:0;text-align:center;font-size:0.9rem;">'
-                                f"<strong>{html.escape(_truncate_label(display, 26))}</strong></p>",
-                                unsafe_allow_html=True,
-                            )
-                            st.caption("No preview")
-                            st.button(
-                                "Select" if not picked else "Deselect",
-                                key=_sprite_pick_button_key(fn),
-                                use_container_width=True,
-                                on_click=_toggle_sprite_pick,
-                                args=(fn,),
-                            )
+            if shown < n_items:
+                rest = n_items - shown
+                # Use ``if st.button`` + ``st.rerun()`` instead of ``on_click``: dialog code runs as a
+                # fragment; fragment-scoped reruns can leave ``sprite_browse_show_count`` unsynced so
+                # the next batch label/caption never advance. A full app rerun matches session state.
+                if st.button(
+                    f"Load more — showing {shown}, {rest} left",
+                    key="dlg_sprite_load_more",
+                    use_container_width=True,
+                ):
+                    _sprite_browse_load_more(n_items)
+                    st.rerun()
 
         b1, b2, b3 = st.columns([1, 1, 1])
         with b1:
@@ -314,6 +352,7 @@ def sprite_browse_dialog() -> None:
         with b2:
             if st.button("Clear all picks", key="dlg_sprite_clear_all"):
                 st.session_state.gif_sprite_picks = []
+                st.session_state.sprite_browse_open = True
                 st.rerun()
         with b3:
             if st.button(
@@ -322,6 +361,7 @@ def sprite_browse_dialog() -> None:
                 use_container_width=True,
                 key="dlg_sprite_done",
             ):
+                st.session_state.sprite_browse_open = False
                 st.rerun()
 
 
@@ -466,6 +506,9 @@ with col_a:
         use_container_width=True,
         help="Opens a modal with square thumbnails, names, and search.",
     ):
+        st.session_state.sprite_browse_open = True
+
+    if st.session_state.get("sprite_browse_open"):
         sprite_browse_dialog()
 
     n_sel = len(st.session_state.gif_sprite_picks)
