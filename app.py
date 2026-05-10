@@ -97,15 +97,17 @@ def _cached_front_sprite_gif_bytes(filename: str) -> bytes | None:
 
 
 def _toggle_sprite_pick(fn: str) -> None:
-    lst = st.session_state.setdefault("gif_sprite_picks", [])
-    if fn in lst:
-        st.session_state.gif_sprite_picks = [x for x in lst if x != fn]
+    """Immutable update so session state always tracks a fresh list (avoids stale refs)."""
+    cur = list(st.session_state.get("gif_sprite_picks") or [])
+    if fn in cur:
+        st.session_state.gif_sprite_picks = [x for x in cur if x != fn]
     else:
-        lst.append(fn)
+        st.session_state.gif_sprite_picks = [*cur, fn]
 
 
 def _sprite_pick_button_key(fn: str) -> str:
-    h = hashlib.sha256(fn.encode("utf-8")).hexdigest()[:24]
+    # Full SHA256 — avoid any chance of key collisions from a truncated hash.
+    h = hashlib.sha256(fn.encode("utf-8")).hexdigest()
     return f"dlg_pick_{h}"
 
 
@@ -186,16 +188,23 @@ def sprite_browse_dialog() -> None:
         # Transparent tertiary buttons sit over the GIF; style is scoped to this modal only.
         _tile = 96
         _overlay_h = 108  # covers GIF + st.html wrapper slack so the hit target matches the sprite
+        # Narrow hit targets to the sprite width (centered). Full-width invisible buttons +
+        # negative margins were spilling into neighboring columns and toggling the wrong Pokémon.
         st.markdown(
             f"<style>"
             f"[data-testid='stDialog'] button[kind='tertiary'],"
             f"[role='dialog'] button[kind='tertiary'] {{"
             f"margin-top:-{_overlay_h}px!important;"
             f"min-height:{_overlay_h}px!important;"
-            f"opacity:0.04!important;"
+            f"width:{_tile}px!important;"
+            f"max-width:{_tile}px!important;"
+            f"min-width:{_tile}px!important;"
+            f"margin-left:auto!important;"
+            f"margin-right:auto!important;"
+            f"display:block!important;"
+            f"opacity:0.06!important;"
             f"position:relative!important;"
             f"z-index:10!important;"
-            f"width:100%!important;"
             f"}}"
             f"</style>",
             unsafe_allow_html=True,
@@ -270,14 +279,14 @@ def sprite_browse_dialog() -> None:
                         picked = fn in st.session_state.gif_sprite_picks
                         if blob:
                             _sprite_browse_gif_only(blob, box=TILE, picked=picked)
-                            if st.button(
+                            st.button(
                                 "\u200b",
                                 key=_sprite_pick_button_key(fn),
                                 type="tertiary",
-                                use_container_width=True,
-                                help="Toggle selection",
-                            ):
-                                _toggle_sprite_pick(fn)
+                                width=TILE,
+                                on_click=_toggle_sprite_pick,
+                                args=(fn,),
+                            )
                             st.markdown(
                                 '<p style="margin:6px 0 0 0;padding:0;text-align:center;'
                                 'font-size:0.9rem;line-height:1.15;">'
@@ -291,12 +300,13 @@ def sprite_browse_dialog() -> None:
                                 unsafe_allow_html=True,
                             )
                             st.caption("No preview")
-                            if st.button(
+                            st.button(
                                 "Select" if not picked else "Deselect",
                                 key=_sprite_pick_button_key(fn),
                                 use_container_width=True,
-                            ):
-                                _toggle_sprite_pick(fn)
+                                on_click=_toggle_sprite_pick,
+                                args=(fn,),
+                            )
 
         b1, b2, b3 = st.columns([1, 1, 1])
         with b1:
