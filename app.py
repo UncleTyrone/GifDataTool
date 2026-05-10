@@ -11,6 +11,7 @@ import base64
 import hashlib
 import html
 import os
+import re
 from pathlib import Path
 
 import streamlit as st
@@ -83,6 +84,26 @@ VARIANT_LABELS = [
     ("Shiny back (ani-back-shiny)", "_SHINY_BACK"),
 ]
 
+_CUSTOM_SLUG_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+def _sanitize_custom_slug(raw: str) -> str:
+    s = raw.strip().lower()
+    if not s or not _CUSTOM_SLUG_RE.match(s):
+        raise ValueError(
+            "Slug must use lowercase letters, digits, and hyphens only "
+            "(1–63 chars, no leading/trailing hyphen). Example: `my-boss`."
+        )
+    return s
+
+
+def _resolve_sprite_bytes(path_key: str, filename: str) -> tuple[bytes | None, str, str]:
+    """Showdown fetch with optional per-file custom GIF overrides from session state."""
+    raw = (st.session_state.get("custom_sprite_gifs") or {}).get(filename, {}).get(path_key)
+    if raw is not None:
+        return raw, "(custom upload)", filename
+    return fetch_sprite_bytes_for_variant(path_key, filename)
+
 
 @st.cache_data(ttl=3600, show_spinner="Fetching Showdown /ani/ listing…")
 def list_front_gifs():
@@ -90,10 +111,25 @@ def list_front_gifs():
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _cached_front_sprite_gif_bytes(filename: str) -> bytes | None:
-    """Front /ani/ GIF bytes for browse thumbnails (same fetch as previews)."""
+def _cached_showdown_front_bytes(filename: str) -> bytes | None:
+    """Cached Showdown /ani/ fetch — custom uploads bypass this."""
     blob, _, _ = fetch_sprite_bytes_for_variant("_FRONT", filename)
     return blob
+
+
+def _front_sprite_thumbnail_bytes(filename: str) -> bytes | None:
+    """Browse thumbnails: custom front GIF if set, else cached Showdown."""
+    custom = (st.session_state.get("custom_sprite_gifs") or {}).get(filename, {}).get("_FRONT")
+    if custom is not None:
+        return custom
+    return _cached_showdown_front_bytes(filename)
+
+
+def _browse_sprite_filenames() -> list[str]:
+    """Showdown /ani/ listing plus any custom-only slugs so they appear in Browse & search."""
+    base = list_front_gifs()
+    extra = list((st.session_state.get("custom_sprite_gifs") or {}).keys())
+    return sorted(set(base) | set(extra), key=str.lower)
 
 
 def _toggle_sprite_pick(fn: str) -> None:
@@ -201,6 +237,7 @@ apply_saved_credentials_or_env(
 )
 
 st.session_state.setdefault("gif_sprite_picks", [])
+st.session_state.setdefault("custom_sprite_gifs", {})
 _SPRITE_BROWSE_INITIAL = 50
 _SPRITE_BROWSE_STEP = 50
 st.session_state.setdefault("sprite_browse_show_count", _SPRITE_BROWSE_INITIAL)
@@ -211,7 +248,7 @@ _SPRITE_BROWSE_FILTER_SNAP = "_sprite_browse_filter_snap"
 
 @st.dialog("Browse Pokémon sprites", width="large", dismissible=False)
 def sprite_browse_dialog() -> None:
-    names = list_front_gifs()
+    names = _browse_sprite_filenames()
 
     with st.container(border=True):
         st.markdown("##### Sprite library")
@@ -305,7 +342,7 @@ def sprite_browse_dialog() -> None:
                             with tile_mid:
                                 slug = fn.replace(".gif", "")
                                 display = slug_to_default_name(slug)
-                                blob = _cached_front_sprite_gif_bytes(fn)
+                                blob = _front_sprite_thumbnail_bytes(fn)
                                 picked = fn in st.session_state.gif_sprite_picks
                                 if blob:
                                     _sprite_browse_gif_only(blob, box=TILE, picked=picked)
@@ -495,10 +532,88 @@ col_a, col_b = st.columns([1, 2])
 with col_a:
     if st.button("Refresh sprite list (front /ani/)"):
         list_front_gifs.clear()
-        _cached_front_sprite_gif_bytes.clear()
+        _cached_showdown_front_bytes.clear()
 
     names = list_front_gifs()
     st.metric("Sprites in /ani/", len(names))
+
+    with st.expander("Custom GIF uploads", expanded=False):
+        st.caption(
+            "Upload an animated GIF and assign **front**, **back**, or shiny variants. "
+            "The slug becomes the filename (e.g. `my-boss` → `my-boss.gif`). "
+            "That variant uses your file when building; other variants still come from Showdown."
+        )
+        cu = st.file_uploader("GIF file", type=["gif"], key="custom_gif_uploader_widget")
+        cs = st.text_input(
+            "Slug (without .gif)",
+            key="custom_gif_slug_input",
+            placeholder="e.g. my-trainer or pikachu",
+            help="Lowercase letters, digits, hyphens. Match an existing Showdown slug to override one variant only.",
+        )
+        vi = st.selectbox(
+            "Variant",
+            options=list(range(len(VARIANT_LABELS))),
+            format_func=lambda i: VARIANT_LABELS[i][0],
+            key="custom_gif_variant_sel",
+        )
+        b1, b2 = st.columns(2)
+        with b1:
+            do_add = st.button(
+                "Add to library & selection",
+                type="primary",
+                key="custom_gif_add_btn",
+                use_container_width=True,
+            )
+        with b2:
+            do_clear = st.button(
+                "Clear all custom GIFs",
+                key="custom_gif_clear_btn",
+                use_container_width=True,
+            )
+
+        if do_clear:
+            st.session_state.custom_sprite_gifs = {}
+            st.rerun()
+
+        if do_add:
+            if cu is None:
+                st.warning("Choose a GIF file to upload.")
+            else:
+                try:
+                    slug = _sanitize_custom_slug(cs)
+                except ValueError as e:
+                    st.error(str(e))
+                else:
+                    fn = f"{slug}.gif"
+                    vk = VARIANT_LABELS[vi][1]
+                    cg = st.session_state.setdefault("custom_sprite_gifs", {})
+                    cg.setdefault(fn, {})[vk] = cu.getvalue()
+                    picks = list(st.session_state.get("gif_sprite_picks") or [])
+                    if fn not in picks:
+                        st.session_state.gif_sprite_picks = [*picks, fn]
+                    st.success(
+                        f"`{fn}` saved as **{VARIANT_LABELS[vi][0]}** and added to selection."
+                    )
+                    st.rerun()
+
+        cg = st.session_state.get("custom_sprite_gifs") or {}
+        if cg:
+            st.markdown("**Stored custom GIFs**")
+            for fn in sorted(cg.keys(), key=str.lower):
+                labels = [
+                    next(l for l, kk in VARIANT_LABELS if kk == k)
+                    for k in sorted(cg[fn].keys())
+                ]
+                st.caption(f"`{fn}` — " + ", ".join(labels))
+            rm = st.selectbox(
+                "Remove overrides for file",
+                options=["—"] + sorted(cg.keys(), key=str.lower),
+                key="custom_gif_remove_sel",
+            )
+            if st.button("Remove selected file’s uploads", key="custom_gif_remove_btn"):
+                if rm != "—" and rm in st.session_state.custom_sprite_gifs:
+                    del st.session_state.custom_sprite_gifs[rm]
+                    st.rerun()
 
     if st.button(
         "Browse sprites…",
@@ -558,21 +673,24 @@ with col_b:
             st.markdown(f"**{slug_label}**")
             preview_cols = st.columns(min(4, len(VARIANT_LABELS)))
             for i, (label, vkey) in enumerate(VARIANT_LABELS):
-                blob, tried_url, resolved_file = fetch_sprite_bytes_for_variant(
-                    vkey, pick_fn
-                )
+                blob, tried_url, resolved_file = _resolve_sprite_bytes(vkey, pick_fn)
                 with preview_cols[i % len(preview_cols)]:
                     st.caption(label.split("(")[0].strip())
                     if blob:
                         _preview_animated_gif(blob, width=120)
-                        if resolved_file != pick_fn:
+                        if tried_url == "(custom upload)":
+                            st.caption("Custom GIF")
+                        elif resolved_file != pick_fn:
                             st.caption(
                                 f"→ {resolved_file.replace('.gif', '')} (fallback)"
                             )
                     else:
                         st.caption("Could not load")
-                        short = tried_url[-72:] if len(tried_url) > 72 else tried_url
-                        st.caption("…" + short if len(tried_url) > 72 else short)
+                        if tried_url == "(custom upload)":
+                            st.caption("—")
+                        else:
+                            short = tried_url[-72:] if len(tried_url) > 72 else tried_url
+                            st.caption("…" + short if len(tried_url) > 72 else short)
 
         dry_run = st.checkbox(
             "Dry run (build sheets only — no Roblox upload, no file write)",
@@ -628,9 +746,7 @@ with col_b:
                     slug_disp = pick_fn.replace(".gif", "")
                     for vk in variant_choice:
                         label = next(l for l, kk in VARIANT_LABELS if kk == vk)
-                        blob, _, resolved_file = fetch_sprite_bytes_for_variant(
-                            vk, pick_fn
-                        )
+                        blob, _, resolved_file = _resolve_sprite_bytes(vk, pick_fn)
                         if not blob:
                             errors.append(
                                 f"`{slug_disp}` · {label}: no GIF on Showdown"
@@ -730,4 +846,6 @@ with col_b:
                             )
 
     else:
-        st.info("Select one or more Pokémon from the list (left column).")
+        st.info(
+            "Select Pokémon from **Browse sprites** or add **Custom GIF uploads** (left column)."
+        )
