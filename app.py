@@ -8,9 +8,9 @@ Run: streamlit run app.py
 from __future__ import annotations
 
 import base64
+import hashlib
 import html
 import os
-import urllib.parse
 from pathlib import Path
 
 import streamlit as st
@@ -96,6 +96,19 @@ def _cached_front_sprite_gif_bytes(filename: str) -> bytes | None:
     return blob
 
 
+def _toggle_sprite_pick(fn: str) -> None:
+    lst = st.session_state.setdefault("gif_sprite_picks", [])
+    if fn in lst:
+        st.session_state.gif_sprite_picks = [x for x in lst if x != fn]
+    else:
+        lst.append(fn)
+
+
+def _sprite_pick_button_key(fn: str) -> str:
+    h = hashlib.sha256(fn.encode("utf-8")).hexdigest()[:24]
+    return f"dlg_pick_{h}"
+
+
 def _env(key: str, ui_val: str) -> str:
     v = (ui_val or "").strip() or os.environ.get(key, "")
     return v.strip()
@@ -118,34 +131,28 @@ def _preview_animated_gif(gif_bytes: bytes, width: int = 120) -> None:
     st.iframe(html, height=iframe_h, width="stretch")
 
 
-def _sprite_browse_clickable_tile(
-    gif_bytes: bytes, *, box: int, filename: str, picked: bool
+def _sprite_browse_gif_only(
+    gif_bytes: bytes, *, box: int, picked: bool
 ) -> None:
-    """Square GIF tile; entire tile is a link that toggles selection via ``?gif_toggle=``."""
+    """Square GIF only (title rendered separately). Used with an overlaid transparent button."""
     b64 = base64.standard_b64encode(gif_bytes).decode("ascii")
     r = max(10, min(box // 5, 16))
-    q = urllib.parse.quote(filename, safe="")
     border = (
         "2px solid rgba(59,130,246,0.95)"
         if picked
         else "1px solid rgba(80,90,110,0.22)"
     )
     bg = "rgba(59,130,246,0.18)" if picked else "rgba(120,130,150,0.12)"
-    inner = (
+    html_block = (
         f'<div style="width:{box}px;height:{box}px;margin:0 auto;box-sizing:border-box;'
         f'display:flex;align-items:center;justify-content:center;'
-        f'background:{bg};border-radius:{r}px;border:{border};overflow:hidden;cursor:pointer;">'
+        f'background:{bg};border-radius:{r}px;border:{border};overflow:hidden;">'
         f'<img src="data:image/gif;base64,{b64}" alt="" draggable="false" '
-        'style="max-width:92%;max-height:92%;object-fit:contain;pointer-events:none;'
+        'style="max-width:92%;max-height:92%;object-fit:contain;'
         'image-rendering:pixelated;image-rendering:-webkit-optimize-contrast;" />'
         "</div>"
     )
-    html = (
-        f'<a href="?gif_toggle={q}" '
-        'style="display:block;text-decoration:none;-webkit-tap-highlight-color:transparent;">'
-        f"{inner}</a>"
-    )
-    st.html(html, width="content")
+    st.html(html_block, width="content")
 
 
 def _truncate_label(s: str, max_len: int = 20) -> str:
@@ -153,31 +160,6 @@ def _truncate_label(s: str, max_len: int = 20) -> str:
     if len(s) <= max_len:
         return s
     return s[: max_len - 1] + "…"
-
-
-def _consume_gif_toggle_query_param() -> None:
-    """Sprite tiles link to ``?gif_toggle=<filename>``; toggle pick and reopen the browser."""
-    qp = st.query_params
-    if "gif_toggle" not in qp:
-        return
-    raw = qp.get("gif_toggle")
-    if isinstance(raw, list):
-        raw = raw[0]
-    fn = urllib.parse.unquote(str(raw))
-    if not fn.lower().endswith(".gif"):
-        qp.pop("gif_toggle", None)
-        return
-    if fn not in set(list_front_gifs()):
-        qp.pop("gif_toggle", None)
-        return
-    lst = st.session_state.setdefault("gif_sprite_picks", [])
-    if fn in lst:
-        st.session_state.gif_sprite_picks = [x for x in lst if x != fn]
-    else:
-        lst.append(fn)
-    qp.pop("gif_toggle", None)
-    st.session_state["_open_sprite_browse_dialog"] = True
-    st.rerun()
 
 
 st.set_page_config(page_title="GifData Tool", layout="wide")
@@ -194,8 +176,6 @@ apply_saved_credentials_or_env(
 st.session_state.setdefault("gif_sprite_picks", [])
 st.session_state.setdefault("sprite_browse_page", 1)
 
-_consume_gif_toggle_query_param()
-
 
 @st.dialog("Browse Pokémon sprites", width="large")
 def sprite_browse_dialog() -> None:
@@ -203,9 +183,26 @@ def sprite_browse_dialog() -> None:
 
     with st.container(border=True):
         st.markdown("##### Sprite library")
+        # Transparent tertiary buttons sit over the GIF; style is scoped to this modal only.
+        _tile = 96
+        _overlay_h = 108  # covers GIF + st.html wrapper slack so the hit target matches the sprite
+        st.markdown(
+            f"<style>"
+            f"[data-testid='stDialog'] button[kind='tertiary'],"
+            f"[role='dialog'] button[kind='tertiary'] {{"
+            f"margin-top:-{_overlay_h}px!important;"
+            f"min-height:{_overlay_h}px!important;"
+            f"opacity:0.04!important;"
+            f"position:relative!important;"
+            f"z-index:10!important;"
+            f"width:100%!important;"
+            f"}}"
+            f"</style>",
+            unsafe_allow_html=True,
+        )
         st.caption(
-            "Search by filename, slug, or display name. **Click a sprite** to add or remove "
-            "it from your selection — choices stay saved when you close this window."
+            "Search by filename, slug, or display name. **Click the sprite** to toggle selection "
+            "(same row as its name). Updates stay in this session when you close the window."
         )
         filter_raw = st.text_input(
             "Search",
@@ -233,7 +230,7 @@ def sprite_browse_dialog() -> None:
 
         PAGE_SIZE = 30
         COLS = 5
-        TILE = 96
+        TILE = _tile
         n_items = len(filtered)
         total_pages = max(1, (n_items + PAGE_SIZE - 1) // PAGE_SIZE) if n_items else 1
 
@@ -272,21 +269,34 @@ def sprite_browse_dialog() -> None:
                         blob = _cached_front_sprite_gif_bytes(fn)
                         picked = fn in st.session_state.gif_sprite_picks
                         if blob:
-                            _sprite_browse_clickable_tile(
-                                blob,
-                                box=TILE,
-                                filename=fn,
-                                picked=picked,
+                            _sprite_browse_gif_only(blob, box=TILE, picked=picked)
+                            if st.button(
+                                "\u200b",
+                                key=_sprite_pick_button_key(fn),
+                                type="tertiary",
+                                use_container_width=True,
+                                help="Toggle selection",
+                            ):
+                                _toggle_sprite_pick(fn)
+                            st.markdown(
+                                '<p style="margin:6px 0 0 0;padding:0;text-align:center;'
+                                'font-size:0.9rem;line-height:1.15;">'
+                                f"<strong>{html.escape(_truncate_label(display, 26))}</strong></p>",
+                                unsafe_allow_html=True,
                             )
                         else:
-                            st.caption("—")
-                        st.markdown(
-                            '<p style="margin:4px 0 -8px 0;line-height:1.12;text-align:center;">'
-                            f'<strong style="font-size:0.92rem;">{html.escape(_truncate_label(display, 22))}</strong><br/>'
-                            f'<span style="font-size:0.74rem;color:#64748b;">'
-                            f"{html.escape(_truncate_label(slug, 18))}</span></p>",
-                            unsafe_allow_html=True,
-                        )
+                            st.markdown(
+                                '<p style="margin:0;text-align:center;font-size:0.9rem;">'
+                                f"<strong>{html.escape(_truncate_label(display, 26))}</strong></p>",
+                                unsafe_allow_html=True,
+                            )
+                            st.caption("No preview")
+                            if st.button(
+                                "Select" if not picked else "Deselect",
+                                key=_sprite_pick_button_key(fn),
+                                use_container_width=True,
+                            ):
+                                _toggle_sprite_pick(fn)
 
         b1, b2, b3 = st.columns([1, 1, 1])
         with b1:
@@ -432,8 +442,6 @@ if not _has_upload and not _has_disk:
 
 col_a, col_b = st.columns([1, 2])
 
-_open_sprite_browse = st.session_state.pop("_open_sprite_browse_dialog", False)
-
 with col_a:
     if st.button("Refresh sprite list (front /ani/)"):
         list_front_gifs.clear()
@@ -448,9 +456,6 @@ with col_a:
         use_container_width=True,
         help="Opens a modal with square thumbnails, names, and search.",
     ):
-        _open_sprite_browse = True
-
-    if _open_sprite_browse:
         sprite_browse_dialog()
 
     n_sel = len(st.session_state.gif_sprite_picks)
