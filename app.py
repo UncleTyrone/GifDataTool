@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from credentials_browser import (
     apply_saved_credentials_or_env,
     save_credentials_to_browser,
+    should_show_disk_path_expander,
     should_show_server_dotenv_save_ui,
     try_local_storage_manager,
 )
@@ -120,12 +121,6 @@ apply_saved_credentials_or_env(
     initial_disk_path=_initial_lua_path_str(),
 )
 
-if st.session_state.pop("_cred_saved_flash", False):
-    st.success(
-        "Saved credentials in **this browser** (localStorage). "
-        "They stay on your device and are not shared with other visitors."
-    )
-
 st.title("GifData sprite importer")
 st.caption(
     "Lists Pokémon Showdown animated sprites, previews GIFs, builds spritesheets, "
@@ -153,6 +148,13 @@ with st.sidebar:
     if _ls_mgr is not None:
         if st.button("Save credentials (this browser)"):
             save_credentials_to_browser(_ls_mgr)
+        if st.session_state.get("_cred_saved_banner"):
+            st.success(
+                "Saved in **this browser** (localStorage). Only you can see these values."
+            )
+            if st.button("Dismiss", key="dismiss_cred_saved_banner"):
+                del st.session_state["_cred_saved_banner"]
+                st.rerun()
         st.caption(
             "Stores API key, user/group IDs, and optional disk path in **your browser** "
             "(localStorage). Each visitor only sees their own saved values."
@@ -212,31 +214,37 @@ else:
     st.session_state.pop("gifdata_lua_content", None)
     st.session_state.pop("gifdata_lua_upload_name", None)
 
-with st.expander("Optional: patch a file on disk instead (local runs)", expanded=False):
-    st.text_input(
-        "Path to GifData.lua on this machine",
-        key="gifdata_disk_path",
-        placeholder="e.g. C:/Projects/MyGame/GifData.lua",
-        help=(
-            "If set and the file exists, it is used **only when nothing is uploaded** above. "
-            "The patched file is written back to this path. Bundled repo `GifData.lua` is "
-            "prefilled below only when that file exists beside `app.py`."
-        ),
-    )
-    _dp = st.session_state.get("gifdata_disk_path", "").strip()
-    if _dp:
-        _exp = Path(_dp).expanduser()
-        if not _exp.is_file():
-            st.warning(f"Path not found — will not be used until it exists: `{_exp}`")
+if should_show_disk_path_expander():
+    with st.expander("Optional: patch a file on disk instead (local runs)", expanded=False):
+        st.text_input(
+            "Path to GifData.lua on this machine",
+            key="gifdata_disk_path",
+            placeholder="e.g. C:/Projects/MyGame/GifData.lua",
+            help=(
+                "If set and the file exists, it is used **only when nothing is uploaded** above. "
+                "The patched file is written back to this path. Bundled repo `GifData.lua` is "
+                "prefilled below only when that file exists beside `app.py`."
+            ),
+        )
+        _dp = st.session_state.get("gifdata_disk_path", "").strip()
+        if _dp:
+            _exp = Path(_dp).expanduser()
+            if not _exp.is_file():
+                st.warning(
+                    f"Path not found — will not be used until it exists: `{_exp}`"
+                )
 
 _has_upload = bool(st.session_state.get("gifdata_lua_content"))
 _dp2 = st.session_state.get("gifdata_disk_path", "").strip()
 _has_disk = bool(_dp2 and Path(_dp2).expanduser().is_file())
 if not _has_upload and not _has_disk:
-    st.info(
-        "**Upload** your `GifData.lua` above (recommended), "
-        "or open **Optional: patch a file on disk** and set a valid path."
-    )
+    if should_show_disk_path_expander():
+        st.info(
+            "**Upload** your `GifData.lua` above (recommended), "
+            "or open **Optional: patch a file on disk** and set a valid path."
+        )
+    else:
+        st.info("**Upload** your `GifData.lua` above (required on hosted Streamlit).")
 
 col_a, col_b = st.columns([1, 2])
 

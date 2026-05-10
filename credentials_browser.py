@@ -7,11 +7,13 @@ from typing import Any
 
 
 def likely_streamlit_cloud_or_hosted() -> bool:
-    """Best-effort detection of Streamlit Community Cloud / Snowflake-hosted runtimes."""
+    """Best-effort detection of hosted Streamlit / cloud runtimes (never rely on this alone)."""
     e = os.environ
     if str(e.get("STREAMLIT_COMMUNITY_CLOUD", "")).lower() in ("1", "true", "yes"):
         return True
     if str(e.get("STREAMLIT_CLOUD_DEPLOYMENT", "")).lower() in ("1", "true", "yes"):
+        return True
+    if e.get("STREAMLIT_CLOUD_REPOSITORY") or e.get("STREAMLIT_CLOUD_REPOSITORY_BRANCH"):
         return True
     for var in (
         "STREAMLIT_SERVER_BASE_URL",
@@ -23,19 +25,39 @@ def likely_streamlit_cloud_or_hosted() -> bool:
             return True
     if e.get("SNOWFLAKE_ACCOUNT"):
         return True
+    if e.get("K_SERVICE") or e.get("K_REVISION"):  # Cloud Run / similar
+        return True
+    if str(e.get("CODESPACES", "")).lower() == "true":
+        return True
     return False
 
 
-def should_show_server_dotenv_save_ui() -> bool:
+def hide_local_filesystem_ui() -> bool:
     """
-    Server-side `.env` writing only makes sense for local `streamlit run`.
-    Hide it on Streamlit Cloud unless explicitly forced (debug).
+    Hide server `.env` writer + optional disk path when app is public / hosted.
+
+    Set in Streamlit **Secrets** (recommended for Community Cloud)::
+
+        GIFDATA_PUBLIC_DEPLOY = "1"
+
+    Optional: ``GIFDATA_SHOW_LOCAL_DISK_UI = "1"`` forces those panels on (debug).
     """
-    if os.environ.get("GIFDATA_SHOW_DOTENV_SAVE", "").lower() in ("1", "true", "yes"):
-        return True
-    if os.environ.get("GIFDATA_HIDE_DOTENV_SAVE", "").lower() in ("1", "true", "yes"):
+    if os.environ.get("GIFDATA_SHOW_LOCAL_DISK_UI", "").lower() in ("1", "true", "yes"):
         return False
-    return not likely_streamlit_cloud_or_hosted()
+    if os.environ.get("GIFDATA_PUBLIC_DEPLOY", "").lower() in ("1", "true", "yes"):
+        return True
+    if os.environ.get("GIFDATA_HIDE_LOCAL_DISK_UI", "").lower() in ("1", "true", "yes"):
+        return True
+    return likely_streamlit_cloud_or_hosted()
+
+
+def should_show_server_dotenv_save_ui() -> bool:
+    return not hide_local_filesystem_ui()
+
+
+def should_show_disk_path_expander() -> bool:
+    return not hide_local_filesystem_ui()
+
 
 # Single JSON blob in localStorage (namespaced per Streamlit app URL path).
 CREDENTIALS_STORAGE_KEY = "gifdata_credentials_v1"
@@ -101,5 +123,6 @@ def save_credentials_to_browser(ls: Any) -> None:
         "ROBLOX_GROUP_ID": st.session_state.get("roblox_group_id", ""),
         "GIFDATA_LUA_PATH": st.session_state.get("gifdata_disk_path", ""),
     }
-    st.session_state["_cred_saved_flash"] = True
+    # Sidebar banner survives the rerun from localStorage sync (unlike one-shot st.success).
+    st.session_state["_cred_saved_banner"] = True
     st.rerun()
