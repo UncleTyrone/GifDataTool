@@ -23,6 +23,7 @@ from credentials_browser import (
     should_show_disk_path_expander,
     should_show_server_dotenv_save_ui,
     try_local_storage_manager,
+    use_server_environ_for_roblox_defaults,
 )
 from gifdata_patch import format_entry_line, upsert_multi_section
 from roblox_upload import upload_image_asset
@@ -69,9 +70,10 @@ def merge_dotenv(path: Path, updates: dict[str, str]) -> None:
 
 
 def _initial_lua_path_str() -> str:
-    env_p = os.environ.get("GIFDATA_LUA_PATH", "").strip()
-    if env_p:
-        return env_p
+    if use_server_environ_for_roblox_defaults():
+        env_p = os.environ.get("GIFDATA_LUA_PATH", "").strip()
+        if env_p:
+            return env_p
     if DEFAULT_LUA.is_file():
         return str(DEFAULT_LUA.resolve())
     return ""
@@ -159,8 +161,12 @@ def _sprite_pick_button_key(fn: str) -> str:
 
 
 def _env(key: str, ui_val: str) -> str:
-    v = (ui_val or "").strip() or os.environ.get(key, "")
-    return v.strip()
+    v = (ui_val or "").strip()
+    if v:
+        return v
+    if key.startswith("ROBLOX_") and not use_server_environ_for_roblox_defaults():
+        return ""
+    return (os.environ.get(key, "") or "").strip()
 
 
 def _preview_animated_gif(gif_bytes: bytes, width: int = 120) -> None:
